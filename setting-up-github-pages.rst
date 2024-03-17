@@ -107,3 +107,18 @@ putting the action in ``.github/workflows/sphinx.yml``
 and setting up the GitHub Pages setting for the repository as indicated.
 
 Add, commit and push the action.
+
+----
+
+
+Hmm. Let's go old school and try the "branches" approach from that workflow
+page.
+
+Ah - we need specific Python version and I keep forgetting I need to install
+the library requirements!
+
+So a combination of the stuff in ``ci.yaml`` and the suggestions from
+https://www.sphinx-doc.org/en/master/tutorial/deploying.html
+should work...
+
+...and it does. So I've not got live deployment of docs.
