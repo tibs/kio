@@ -4,7 +4,8 @@ authors = [
   { name="Anton Agestam", email="anton.agestam@aiven.io" },
 ]
 description = "Python data types for the Apache Kafka® Protocol."
-license = {text = "Apache-2.0 license"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 classifiers = [
   "Intended Audience :: Developers",
@@ -14,12 +15,14 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
   "Topic :: Database",
 ]
 dynamic = ["version", "readme"]
 dependencies = [
   "typing-extensions>=4.6.0",
+  "crc32c>=2.3",
 ]
 
 [project.optional-dependencies]
@@ -43,10 +46,11 @@ all = [
 
 [project.urls]
 "Source Repository" = "https://github.com/Aiven-Open/kio"
+"Documentation" = "https://aiven-open.github.io/kio/"
 "Bug Tracker" = "https://github.com/Aiven-Open/kio/issues"
 
 [build-system]
-requires = ["setuptools>=68.1.2", "wheel"]
+requires = ["setuptools==80.9.0", "setuptools-scm==9.2.2", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -59,6 +63,14 @@ readme = {file = "README.md", content-type = "text/markdown; charset=UTF-8"}
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
+
+
+[tool.setuptools_scm]
+version_file = "src/kio/_version.py"
+
+
+[tool.check-manifest]
+ignore = ["src/kio/_version.py"]
 
 
 [tool.black]
@@ -89,6 +101,8 @@ markers = [
 [tool.ruff]
 fix = true
 target-version = "py311"
+
+[tool.ruff.lint]
 extend-select = [
   # bugbear
   "B",
@@ -132,18 +146,21 @@ extend-ignore = [
   "E501",
   # Allow function calls in argument defaults.
   "B008",
+  # Bad advice, builtin syntax is simpler than imports.
+  "SIM105",
 ]
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 lines-between-types = 1
 force-single-line = true
 known-first-party = ["kio", "tests", "codegen"]
 
-[tool.ruff.mccabe]
+[tool.ruff.lint.mccabe]
 max-complexity = 10
 
-[tool.ruff.flake8-tidy-imports]
+[tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
+
 
 [tool.importlinter]
 root_packages = ["kio", "codegen", "tests"]

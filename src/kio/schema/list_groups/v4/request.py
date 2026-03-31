@@ -1,7 +1,5 @@
 """
-Generated from ListGroupsRequest.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/ListGroupsRequest.json
+Generated from ``clients/src/main/resources/common/message/ListGroupsRequest.json``.
 """
 
 from dataclasses import dataclass
@@ -23,4 +21,4 @@ class ListGroupsRequest:
     states_filter: tuple[str, ...] = field(
         metadata={"kafka_type": "string"}, default=()
     )
-    """The states of the groups we want to list. If empty all groups are returned with their state."""
+    """The states of the groups we want to list. If empty, all groups are returned with their state."""

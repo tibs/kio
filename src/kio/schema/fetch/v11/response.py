@@ -1,19 +1,18 @@
 """
-Generated from FetchResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/FetchResponse.json
+Generated from ``clients/src/main/resources/common/message/FetchResponse.json``.
 """
 
 from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v0.header import ResponseHeader
 from kio.schema.types import BrokerId
 from kio.schema.types import ProducerId
 from kio.schema.types import TopicName
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
+from kio.static.primitive import Records
 from kio.static.primitive import i16
 from kio.static.primitive import i32
 from kio.static.primitive import i32Timedelta
@@ -56,7 +55,7 @@ class PartitionData:
         metadata={"kafka_type": "int32"}, default=BrokerId(-1)
     )
     """The preferred read replica for the consumer to use on its next fetch request"""
-    records: bytes | None = field(metadata={"kafka_type": "records"})
+    records: Records | None = field(metadata={"kafka_type": "records"})
     """The record data."""
 
 

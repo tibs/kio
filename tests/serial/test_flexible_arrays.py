@@ -8,15 +8,20 @@ from kio.serial import entity_reader
 from kio.serial import entity_writer
 from kio.serial.readers import read_compact_array_length
 from kio.serial.readers import read_compact_string
+from kio.serial.readers import read_int32
 from kio.serial.readers import read_uint8
 from kio.serial.readers import read_unsigned_varint
 from kio.serial.writers import write_compact_array_length
 from kio.serial.writers import write_compact_string
 from kio.serial.writers import write_empty_tagged_fields
+from kio.serial.writers import write_int32
 from kio.serial.writers import write_uint8
 from kio.static.constants import EntityType
 from kio.static.primitive import i16
+from kio.static.primitive import i32
 from kio.static.primitive import u8
+from tests.read import exhaust
+from tests.read import read
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -48,10 +53,9 @@ def test_can_parse_flexible_entity_array(buffer: io.BytesIO) -> None:
     # Parent tagged fields
     write_empty_tagged_fields(buffer)
 
-    buffer.seek(0)
+    instance, size = entity_reader(Parent)(buffer.getvalue(), 0)
 
-    instance = entity_reader(Parent)(buffer)
-
+    assert size == buffer.tell()
     assert instance == Parent(
         name="Parent Name",
         children=(
@@ -61,7 +65,7 @@ def test_can_parse_flexible_entity_array(buffer: io.BytesIO) -> None:
     )
 
 
-def test_can_serialize_flexible_entity_array(buffer: io.BytesIO) -> None:
+def test_can_serialize_flexible_entity_array() -> None:
     write_parent = entity_writer(Parent)
     instance = Parent(
         name="Parent Name",
@@ -70,16 +74,41 @@ def test_can_serialize_flexible_entity_array(buffer: io.BytesIO) -> None:
             Child(name="Child 2"),
         ),
     )
-    write_parent(buffer, instance)
-    buffer.seek(0)
+    with io.BytesIO() as stream:
+        write_parent(stream, instance)
+        buffer = stream.getvalue()
 
-    assert read_compact_string(buffer) == "Parent Name"
-    assert read_compact_array_length(buffer) == 2
-    assert read_compact_string(buffer) == "Child 1"
-    assert read_unsigned_varint(buffer) == 0  # child 1 tagged fields
-    assert read_compact_string(buffer) == "Child 2"
-    assert read_unsigned_varint(buffer) == 0  # child 2 tagged fields
-    assert read_unsigned_varint(buffer) == 0  # parent tagged fields
+    offset = 0
+
+    parent_name, size = read_compact_string(buffer, offset)
+    offset += size
+    assert parent_name == "Parent Name"
+
+    array_length, size = read_compact_array_length(buffer, offset)
+    offset += size
+    assert array_length == 2
+
+    child_name, size = read_compact_string(buffer, offset)
+    offset += size
+    assert child_name == "Child 1"
+
+    tagged_fields, size = read_unsigned_varint(buffer, offset)
+    offset += size
+    assert tagged_fields == 0
+
+    child_name, size = read_compact_string(buffer, offset)
+    offset += size
+    assert child_name == "Child 2"
+
+    tagged_fields, size = read_unsigned_varint(buffer, offset)
+    offset += size
+    assert tagged_fields == 0
+
+    tagged_fields, size = read_unsigned_varint(buffer, offset)
+    offset += size
+    assert tagged_fields == 0
+
+    assert offset == len(buffer)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -96,21 +125,126 @@ def test_can_parse_flexible_primitive_array(buffer: io.BytesIO) -> None:
     write_uint8(buffer, u8(0))
     write_uint8(buffer, u8(255))
     write_empty_tagged_fields(buffer)
-    buffer.seek(0)
 
-    instance = entity_reader(Flat)(buffer)
+    instance, size = entity_reader(Flat)(buffer.getvalue(), 0)
 
+    assert size == buffer.tell()
     assert instance == Flat(values=(u8(123), u8(0), u8(255)))
 
 
-def test_can_serialize_flexible_primitive_array(buffer: io.BytesIO) -> None:
+def test_can_serialize_flexible_primitive_array() -> None:
     write_flat = entity_writer(Flat)
     instance = Flat(values=(u8(123), u8(0), u8(255)))
-    write_flat(buffer, instance)
-    buffer.seek(0)
+    offset = 0
 
-    assert read_compact_array_length(buffer) == 3
-    assert read_uint8(buffer) == 123
-    assert read_uint8(buffer) == 0
-    assert read_uint8(buffer) == 255
-    assert read_unsigned_varint(buffer) == 0  # tagged fields
+    with io.BytesIO() as stream:
+        write_flat(stream, instance)
+        buffer = stream.getvalue()
+
+    array_length, size = read_compact_array_length(buffer, offset)
+    offset += size
+    assert array_length == 3
+
+    value, size = read_uint8(buffer, offset)
+    offset += size
+    assert value == 123
+
+    value, size = read_uint8(buffer, offset)
+    offset += size
+    assert value == 0
+
+    value, size = read_uint8(buffer, offset)
+    offset += size
+    assert value == 255
+
+    tagged_fields, size = read_unsigned_varint(buffer, offset)
+    offset += size
+    assert tagged_fields == 0
+
+    assert offset == len(buffer)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NullablePrimitiveArray:
+    __type__: ClassVar = EntityType.request
+    __version__: ClassVar[i16] = i16(0)
+    __flexible__: ClassVar[bool] = True
+    values: tuple[i32, ...] | None = field(
+        metadata={"kafka_type": "int32"},
+        default=None,
+    )
+
+
+def test_can_serialize_nullable_primitive_array_with_values(
+    buffer: io.BytesIO,
+) -> None:
+    entity_writer(NullablePrimitiveArray)(
+        buffer,
+        NullablePrimitiveArray(values=(i32(1), i32(2), i32(3))),
+    )
+
+    length, remaining = read(read_compact_array_length, buffer.getvalue())
+    assert length == 3
+    value, remaining = read(read_int32, remaining)
+    assert value == 1
+    value, remaining = read(read_int32, remaining)
+    assert value == 2
+    value, remaining = read(read_int32, remaining)
+    assert value == 3
+    tagged_fields = exhaust(read_unsigned_varint, remaining)
+    assert tagged_fields == 0
+
+
+def test_can_serialize_nullable_primitive_array_with_null(buffer: io.BytesIO) -> None:
+    entity_writer(NullablePrimitiveArray)(
+        buffer,
+        NullablePrimitiveArray(values=None),
+    )
+
+    length, remaining = read(read_compact_array_length, buffer.getvalue())
+    assert length is None
+    tagged_fields = exhaust(read_unsigned_varint, remaining)
+    assert tagged_fields == 0
+
+
+def test_can_parse_nullable_primitive_array_with_values(buffer: io.BytesIO) -> None:
+    write_compact_array_length(buffer, 2)
+    write_int32(buffer, i32(42))
+    write_int32(buffer, i32(99))
+    write_empty_tagged_fields(buffer)
+
+    instance, size = entity_reader(NullablePrimitiveArray)(buffer.getvalue(), 0)
+
+    assert size == buffer.tell()
+    assert instance.values == (i32(42), i32(99))
+
+
+def test_can_parse_nullable_primitive_array_with_null(buffer: io.BytesIO) -> None:
+    write_compact_array_length(buffer, -1)
+    write_empty_tagged_fields(buffer)
+
+    instance, size = entity_reader(NullablePrimitiveArray)(buffer.getvalue(), 0)
+
+    assert size == buffer.tell()
+    assert instance.values is None
+
+
+def test_can_roundtrip_nullable_primitive_array_with_values(
+    buffer: io.BytesIO,
+) -> None:
+    original = NullablePrimitiveArray(values=(i32(10), i32(20)))
+
+    entity_writer(NullablePrimitiveArray)(buffer, original)
+    result = exhaust(entity_reader(NullablePrimitiveArray), buffer.getvalue())
+
+    assert result == original
+
+
+def test_can_roundtrip_nullable_primitive_array_with_null(buffer: io.BytesIO) -> None:
+    original = NullablePrimitiveArray(values=None)
+
+    entity_writer(NullablePrimitiveArray)(buffer, original)
+    result = exhaust(entity_reader(NullablePrimitiveArray), buffer.getvalue())
+
+    assert result == original
+    assert result.values is None

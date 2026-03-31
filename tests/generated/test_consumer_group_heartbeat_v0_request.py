@@ -7,27 +7,12 @@ import pytest
 from hypothesis import given
 from hypothesis.strategies import from_type
 
-from kio.schema.consumer_group_heartbeat.v0.request import Assignor
 from kio.schema.consumer_group_heartbeat.v0.request import ConsumerGroupHeartbeatRequest
 from kio.schema.consumer_group_heartbeat.v0.request import TopicPartitions
 from kio.serial import entity_reader
 from kio.serial import entity_writer
 from tests.conftest import JavaTester
 from tests.conftest import setup_buffer
-
-read_assignor: Final = entity_reader(Assignor)
-
-
-@pytest.mark.roundtrip
-@given(from_type(Assignor))
-def test_assignor_roundtrip(instance: Assignor) -> None:
-    writer = entity_writer(Assignor)
-    with setup_buffer() as buffer:
-        writer(buffer, instance)
-        buffer.seek(0)
-        result = read_assignor(buffer)
-    assert instance == result
-
 
 read_topic_partitions: Final = entity_reader(TopicPartitions)
 
@@ -38,8 +23,11 @@ def test_topic_partitions_roundtrip(instance: TopicPartitions) -> None:
     writer = entity_writer(TopicPartitions)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_topic_partitions(buffer)
+        result, _ = read_topic_partitions(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 
@@ -56,8 +44,11 @@ def test_consumer_group_heartbeat_request_roundtrip(
     writer = entity_writer(ConsumerGroupHeartbeatRequest)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_consumer_group_heartbeat_request(buffer)
+        result, _ = read_consumer_group_heartbeat_request(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 

@@ -1,10 +1,8 @@
 # ruff: noqa: T201
-# ruff: noqa: A003
 
 from __future__ import annotations
 
 import pathlib
-import shutil
 import textwrap
 
 from collections import defaultdict
@@ -39,22 +37,19 @@ from .parser import PrimitiveArrayField
 from .parser import PrimitiveArrayType
 from .parser import PrimitiveField
 from .parser import parse_file
+from .util import create_package
 
-schema_repository_source: Final = (
-    f"https://github.com/apache/kafka"
-    f"/tree/{build_tag}/clients/src/main/resources/common/message/"
-)
+schema_repository_source: Final = "clients/src/main/resources/common/message/"
 imports_and_docstring: Final = '''\
 """
-Generated from {schema_source}.
-
-{schema_repository_source}{schema_source}
+Generated from ``{schema_repository_source}{schema_source}``.
 """
 
 import datetime
 from dataclasses import dataclass, field
 from typing import Annotated, ClassVar
 import uuid
+from kio.schema.errors import ErrorCode
 from kio.static.primitive import i8
 from kio.static.primitive import i16
 from kio.static.primitive import i32
@@ -67,12 +62,12 @@ from kio.static.primitive import f64
 from kio.static.primitive import i32Timedelta
 from kio.static.primitive import i64Timedelta
 from kio.static.primitive import TZAware
-from kio.static.constants import ErrorCode
+from kio.static.primitive import Records
 from kio.static.constants import EntityType
 '''
 
 
-def format_default(
+def format_default(  # noqa: C901
     type_: Primitive | EntityType | CommonStructType,
     default: str | int | float | bool,
     optional: bool,
@@ -92,14 +87,17 @@ def format_default(
         case Primitive.string, default:
             return f"{custom_type_open}{default!r}{custom_type_close}"
         case (
-            Primitive.int8
-            | Primitive.int16
-            | Primitive.int32
-            | Primitive.int64
-            | Primitive.uint16
-            | Primitive.uint32
-            | Primitive.uint64
-        ), str(default):
+            (
+                Primitive.int8
+                | Primitive.int16
+                | Primitive.int32
+                | Primitive.int64
+                | Primitive.uint16
+                | Primitive.uint32
+                | Primitive.uint64
+            ),
+            str(default),
+        ):
             assert not isinstance(type_, EntityType | CommonStructType)
             if custom_type_open:
                 return "".join(
@@ -167,7 +165,11 @@ def format_dataclass_field(
         field_kwargs["metadata"] = repr(metadata)
 
     if isinstance(field_type, PrimitiveArrayType):
-        field_kwargs["default"] = "()"
+        if default == "null":
+            assert optional, "non-optional array field cannot be 'null'"
+            field_kwargs["default"] = "None"
+        else:
+            field_kwargs["default"] = "()"
     elif default is not None:
         field_kwargs["default"] = format_default(
             field_type, default, optional, custom_type
@@ -196,7 +198,7 @@ def format_dataclass_field(
     return f" = field({formatted_kwargs})"
 
 
-def _format_default_for_tagged(
+def _format_default_for_tagged(  # noqa: C901
     field_type: Primitive | PrimitiveArrayType | EntityType | CommonStructType,
 ) -> str:
     match field_type:
@@ -320,17 +322,19 @@ def generate_primitive_array_field(
         if custom_type is None
         else custom_type.get_type_hint()
     )
+    optional = field.is_nullable_for_version(version)
     dataclass_field = format_dataclass_field(
         field_type=field.type,
-        default=None,
-        optional=False,
+        default=field.default,
+        optional=optional,
         custom_type=None,
         tag=field.get_tag(version),
         ignorable=field.ignorable,
     )
+    optional_suffix = " | None" if optional else ""
     return (
         f"    {to_snake_case(field.name)}: "
-        f"tuple[{inner_type_hint}, ...] "
+        f"tuple[{inner_type_hint}, ...]{optional_suffix}"
         f"{dataclass_field}\n"
     )
 
@@ -348,7 +352,7 @@ def format_array_field_call(
     field_kwargs = {}
     if metadata:
         field_kwargs["metadata"] = repr(metadata)
-    if tag is not None and field.ignorable:
+    if tag is not None:
         field_kwargs["default"] = "()"
 
     if not field_kwargs:
@@ -608,11 +612,6 @@ def basic_name(schema_name: str) -> str:
     return to_snake_case(schema_name).removesuffix("_response").removesuffix("_request")
 
 
-def create_package(path: pathlib.Path) -> None:
-    path.mkdir(exist_ok=True)
-    (path / "__init__.py").touch(exist_ok=True)
-
-
 seen_custom_types = set[str]()
 custom_type_imports = """\
 from typing import NewType
@@ -698,8 +697,6 @@ def finalize_exports() -> None:
 def main() -> None:
     schema_output_path = pathlib.Path("src/kio/schema/")
     types_module_path = schema_output_path / "types.py"
-    shutil.rmtree(schema_output_path)
-    create_package(schema_output_path)
     schemas = (pathlib.Path("schema") / build_tag).glob("*.json")
     custom_types = set[CustomTypeDef]()
 
@@ -722,14 +719,14 @@ def main() -> None:
                     module_entity_dependencies[key].append(custom_type)
                     custom_types.add(custom_type)
                 case (version, ExportName() as name):
-                    write_version_export(  # type: ignore[unreachable]
+                    write_version_export(
                         api_name=api_name,
                         api_package_path=api_package,
                         name=name,
                         version=version,
                     )
                 case (version, code):
-                    write_to_version_module(  # type: ignore[unreachable]
+                    write_to_version_module(
                         schema=schema,
                         api_name=api_name,
                         api_package_path=api_package,

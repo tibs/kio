@@ -1,19 +1,17 @@
 """
-Generated from DescribeTransactionsResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/DescribeTransactionsResponse.json
+Generated from ``clients/src/main/resources/common/message/DescribeTransactionsResponse.json``.
 """
 
 from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v1.header import ResponseHeader
 from kio.schema.types import ProducerId
 from kio.schema.types import TopicName
 from kio.schema.types import TransactionalId
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
 from kio.static.primitive import TZAware
 from kio.static.primitive import i16
 from kio.static.primitive import i32

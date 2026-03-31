@@ -9,7 +9,7 @@ from hypothesis.strategies import from_type
 
 from kio.schema.create_topics.v2.request import CreatableReplicaAssignment
 from kio.schema.create_topics.v2.request import CreatableTopic
-from kio.schema.create_topics.v2.request import CreateableTopicConfig
+from kio.schema.create_topics.v2.request import CreatableTopicConfig
 from kio.schema.create_topics.v2.request import CreateTopicsRequest
 from kio.serial import entity_reader
 from kio.serial import entity_writer
@@ -27,22 +27,28 @@ def test_creatable_replica_assignment_roundtrip(
     writer = entity_writer(CreatableReplicaAssignment)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_creatable_replica_assignment(buffer)
+        result, _ = read_creatable_replica_assignment(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 
-read_createable_topic_config: Final = entity_reader(CreateableTopicConfig)
+read_creatable_topic_config: Final = entity_reader(CreatableTopicConfig)
 
 
 @pytest.mark.roundtrip
-@given(from_type(CreateableTopicConfig))
-def test_createable_topic_config_roundtrip(instance: CreateableTopicConfig) -> None:
-    writer = entity_writer(CreateableTopicConfig)
+@given(from_type(CreatableTopicConfig))
+def test_creatable_topic_config_roundtrip(instance: CreatableTopicConfig) -> None:
+    writer = entity_writer(CreatableTopicConfig)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_createable_topic_config(buffer)
+        result, _ = read_creatable_topic_config(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 
@@ -55,8 +61,11 @@ def test_creatable_topic_roundtrip(instance: CreatableTopic) -> None:
     writer = entity_writer(CreatableTopic)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_creatable_topic(buffer)
+        result, _ = read_creatable_topic(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 
@@ -69,8 +78,11 @@ def test_create_topics_request_roundtrip(instance: CreateTopicsRequest) -> None:
     writer = entity_writer(CreateTopicsRequest)
     with setup_buffer() as buffer:
         writer(buffer, instance)
-        buffer.seek(0)
-        result = read_create_topics_request(buffer)
+        result, _ = read_create_topics_request(
+            buffer.getvalue(),
+            0,
+        )
+
     assert instance == result
 
 

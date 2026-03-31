@@ -1,18 +1,16 @@
 """
-Generated from MetadataResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/MetadataResponse.json
+Generated from ``clients/src/main/resources/common/message/MetadataResponse.json``.
 """
 
 from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v0.header import ResponseHeader
 from kio.schema.types import BrokerId
 from kio.schema.types import TopicName
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
 from kio.static.primitive import i16
 from kio.static.primitive import i32
 
@@ -65,7 +63,7 @@ class MetadataResponseTopic:
     error_code: ErrorCode = field(metadata={"kafka_type": "error_code"})
     """The topic error, or 0 if there was no error."""
     name: TopicName = field(metadata={"kafka_type": "string"})
-    """The topic name."""
+    """The topic name. Null for non-existing topics queried by ID. This is never null when ErrorCode is zero. One of Name and TopicId is always populated."""
     partitions: tuple[MetadataResponsePartition, ...]
     """Each partition in the topic."""
 
@@ -78,6 +76,6 @@ class MetadataResponse:
     __api_key__: ClassVar[i16] = i16(3)
     __header_schema__: ClassVar[type[ResponseHeader]] = ResponseHeader
     brokers: tuple[MetadataResponseBroker, ...]
-    """Each broker in the response."""
+    """A list of brokers present in the cluster."""
     topics: tuple[MetadataResponseTopic, ...]
     """Each topic in the response."""

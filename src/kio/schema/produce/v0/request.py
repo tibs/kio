@@ -1,7 +1,5 @@
 """
-Generated from ProduceRequest.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/ProduceRequest.json
+Generated from ``clients/src/main/resources/common/message/ProduceRequest.json``.
 """
 
 from dataclasses import dataclass
@@ -11,6 +9,7 @@ from typing import ClassVar
 from kio.schema.request_header.v1.header import RequestHeader
 from kio.schema.types import TopicName
 from kio.static.constants import EntityType
+from kio.static.primitive import Records
 from kio.static.primitive import i16
 from kio.static.primitive import i32
 from kio.static.primitive import i32Timedelta
@@ -25,7 +24,7 @@ class PartitionProduceData:
     __header_schema__: ClassVar[type[RequestHeader]] = RequestHeader
     index: i32 = field(metadata={"kafka_type": "int32"})
     """The partition index."""
-    records: bytes | None = field(metadata={"kafka_type": "records"})
+    records: Records | None = field(metadata={"kafka_type": "records"})
     """The record data to be produced."""
 
 

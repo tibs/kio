@@ -1,7 +1,5 @@
 """
-Generated from MetadataResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/MetadataResponse.json
+Generated from ``clients/src/main/resources/common/message/MetadataResponse.json``.
 """
 
 import uuid
@@ -10,11 +8,11 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v1.header import ResponseHeader
 from kio.schema.types import BrokerId
 from kio.schema.types import TopicName
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
 from kio.static.primitive import i16
 from kio.static.primitive import i32
 from kio.static.primitive import i32Timedelta
@@ -76,9 +74,9 @@ class MetadataResponseTopic:
     error_code: ErrorCode = field(metadata={"kafka_type": "error_code"})
     """The topic error, or 0 if there was no error."""
     name: TopicName | None = field(metadata={"kafka_type": "string"})
-    """The topic name."""
+    """The topic name. Null for non-existing topics queried by ID. This is never null when ErrorCode is zero. One of Name and TopicId is always populated."""
     topic_id: uuid.UUID | None = field(metadata={"kafka_type": "uuid"})
-    """The topic id."""
+    """The topic id. Zero for non-existing topics queried by name. This is never zero when ErrorCode is zero. One of Name and TopicId is always populated."""
     is_internal: bool = field(metadata={"kafka_type": "bool"}, default=False)
     """True if the topic is internal."""
     partitions: tuple[MetadataResponsePartition, ...]
@@ -99,7 +97,7 @@ class MetadataResponse:
     throttle_time: i32Timedelta = field(metadata={"kafka_type": "timedelta_i32"})
     """The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota."""
     brokers: tuple[MetadataResponseBroker, ...]
-    """Each broker in the response."""
+    """A list of brokers present in the cluster."""
     cluster_id: str | None = field(metadata={"kafka_type": "string"}, default=None)
     """The cluster ID that responding broker belongs to."""
     controller_id: BrokerId = field(

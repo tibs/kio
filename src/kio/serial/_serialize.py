@@ -1,5 +1,6 @@
 import io
 
+from dataclasses import MISSING
 from dataclasses import Field
 from dataclasses import fields
 from typing import Literal
@@ -8,10 +9,15 @@ from typing import assert_never
 from typing import overload
 
 from kio._utils import cache
+from kio.static.primitive import uvarint
 from kio.static.protocol import Entity
 
 from . import writers
-from ._introspect import FieldKind
+from ._implicit_defaults import get_tagged_field_default
+from ._introspect import EntityField
+from ._introspect import EntityTupleField
+from ._introspect import PrimitiveField
+from ._introspect import PrimitiveTupleField
 from ._introspect import classify_field
 from ._introspect import get_field_tag
 from ._introspect import get_schema_field_type
@@ -26,7 +32,7 @@ from .writers import write_tagged_field
 from .writers import write_unsigned_varint
 
 
-def get_writer(
+def get_writer(  # noqa: C901
     kafka_type: str,
     flexible: bool,
     optional: bool,
@@ -104,9 +110,6 @@ def get_field_writer(
     if is_request_header and field.name == "client_id":
         return writers.write_nullable_legacy_string  # type: ignore[return-value]
 
-    field_kind, field_type = classify_field(field)
-    array_writer = compact_array_writer if flexible else legacy_array_writer
-
     # Optionality needs to be special cased for tagged fields, because they are optional
     # by definition. This optionality is implemented in a different way from normal
     # fields, it's implemented by the presence or absence by the tag itself. Hence, we
@@ -114,34 +117,40 @@ def get_field_writer(
     # To be able to match an optional tagged field to a writer that cannot accept None,
     # we hard-code all tagged fields as not optional here.
     optional = False if is_tag else is_optional(field)
+    field_class = classify_field(field)
 
-    match field_kind:
-        case FieldKind.primitive:
-            return get_writer(
+    match field_class:
+        case PrimitiveField():
+            inner_type_writer = get_writer(
                 kafka_type=get_schema_field_type(field),
                 flexible=flexible,
                 optional=optional,
             )
-        case FieldKind.primitive_tuple:
-            return array_writer(  # type: ignore[return-value]
-                get_writer(
-                    kafka_type=get_schema_field_type(field),
-                    flexible=flexible,
-                    optional=optional,
-                )
+        case PrimitiveTupleField():
+            # For primitive arrays, nullability applies to the array itself,
+            # not the inner type. The inner type writer is always non-nullable.
+            inner_type_writer = get_writer(
+                kafka_type=get_schema_field_type(field),
+                flexible=flexible,
+                optional=False,
             )
-        case FieldKind.entity:
-            return (  # type: ignore[no-any-return]
-                entity_writer(field_type, nullable=True)  # type: ignore[call-overload]
+        case EntityField(field_type):
+            inner_type_writer = (
+                entity_writer(field_type, nullable=True)
                 if optional
-                else entity_writer(field_type, nullable=False)  # type: ignore[call-overload]
+                else entity_writer(field_type, nullable=False)
             )
-        case FieldKind.entity_tuple:
-            return array_writer(  # type: ignore[return-value]
-                entity_writer(field_type)  # type: ignore[type-var]
-            )
+        case EntityTupleField(field_type):
+            inner_type_writer = entity_writer(field_type)
         case no_match:
             assert_never(no_match)
+
+    if field_class.is_array:
+        array_writer = compact_array_writer if flexible else legacy_array_writer
+        # mypy fails to bind T to Sequence[object] here.
+        return array_writer(inner_type_writer)  # type: ignore[return-value]
+
+    return inner_type_writer
 
 
 E = TypeVar("E", bound=Entity)
@@ -161,15 +170,15 @@ def _wrap_nullable(write_entity: Writer[E]) -> Writer[E | None]:
 
 
 @overload
-def entity_writer(entity_type: type[E], nullable: Literal[False] = ...) -> Writer[E]:
-    ...
-
-
+def entity_writer(
+    entity_type: type[E],
+    nullable: Literal[False] = ...,
+) -> Writer[E]: ...
 @overload
-def entity_writer(entity_type: type[E], nullable: Literal[True]) -> Writer[E | None]:
-    ...
-
-
+def entity_writer(
+    entity_type: type[E],
+    nullable: Literal[True],
+) -> Writer[E | None]: ...
 @cache
 def entity_writer(entity_type: type[E], nullable: bool = False) -> Writer[E | None]:
     field_writers = {}
@@ -185,7 +194,11 @@ def entity_writer(entity_type: type[E], nullable: bool = False) -> Writer[E | No
             is_tag=tag is not None,
         )
         if tag is not None:
-            tagged_field_writers[tag] = field, field_writer
+            tagged_field_writers[tag] = (
+                field,
+                field_writer,
+                get_tagged_field_default(field),
+            )
         else:
             field_writers[field] = field_writer
 
@@ -214,11 +227,17 @@ def entity_writer(entity_type: type[E], nullable: bool = False) -> Writer[E | No
         num_tagged_fields = 0
         with io.BytesIO() as tag_buffer:
             # Serialize tagged fields. Note that order is important to fulfill spec.
-            for tag, (field, field_writer) in tagged_field_writers.items():
+            for tag, (
+                field,
+                field_writer,
+                implicit_default,
+            ) in tagged_field_writers.items():
                 field_value = getattr(entity, field.name)
 
                 # Skip default-valued fields.
-                if field_value == field.default:
+                if field_value == field.default or (
+                    field.default == MISSING and field_value == implicit_default
+                ):
                     continue
 
                 # Write the tag to the buffer and increase counter.
@@ -231,7 +250,7 @@ def entity_writer(entity_type: type[E], nullable: bool = False) -> Writer[E | No
                 num_tagged_fields += 1
 
             # Write number of tagged fields followed by the serialized tags.
-            write_unsigned_varint(buffer, num_tagged_fields)
+            write_unsigned_varint(buffer, uvarint(num_tagged_fields))
             buffer.write(tag_buffer.getvalue())
 
     return _wrap_nullable(write_entity) if nullable else write_entity  # type: ignore[return-value]

@@ -2,20 +2,28 @@ from dataclasses import Field
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import fields
+from typing import ClassVar
 from uuid import UUID
 
 import pytest
 
-from kio.serial._introspect import FieldKind
+from kio.serial._introspect import EntityField
+from kio.serial._introspect import EntityTupleField
+from kio.serial._introspect import PrimitiveField
+from kio.serial._introspect import PrimitiveTupleField
 from kio.serial._introspect import classify_field
 from kio.serial._introspect import get_schema_field_type
 from kio.serial._introspect import is_optional
 from kio.serial.errors import SchemaError
+from kio.static.constants import EntityType
+from kio.static.primitive import i16
 
 
 @dataclass
 class Nested:
-    ...
+    __type__: ClassVar = EntityType.data
+    __version__: ClassVar = i16(0)
+    __flexible__: ClassVar = True
 
 
 @dataclass
@@ -42,6 +50,9 @@ class A:
     unsupported_union: int | str | bool
 
     uuid_or_none: UUID | None
+    uuid_tag: UUID | None = field(
+        metadata={"kafka_type": "uuid", "tag": 0}, default=None
+    )
 
 
 model_fields = {field.name: field for field in fields(A)}
@@ -91,6 +102,9 @@ class TestIsOptional:
     def test_returns_true_for_nullable_uuid(self) -> None:
         assert is_optional(model_fields["uuid_or_none"]) is True
 
+    def test_returns_true_for_tagged_field_uuid(self) -> None:
+        assert is_optional(model_fields["uuid_tag"]) is True
+
     def test_raises_schema_error_for_invalid_tuple_type(self) -> None:
         with pytest.raises(SchemaError, match=r"has invalid tuple type"):
             is_optional(model_fields["unsupported_tuple"])
@@ -110,28 +124,21 @@ class TestClassifyField:
             classify_field(model_fields["verbose_union_without_none"])
 
     def test_can_classify_primitive_field(self) -> None:
-        assert classify_field(model_fields["primitive"]) == (FieldKind.primitive, int)
+        assert classify_field(model_fields["primitive"]) == PrimitiveField(int)
 
     def test_can_classify_primitive_tuple_field(self) -> None:
-        assert classify_field(model_fields["primitive_tuple"]) == (
-            FieldKind.primitive_tuple,
-            int,
-        )
+        expected = PrimitiveTupleField(int)
+        assert classify_field(model_fields["primitive_tuple"]) == expected
 
     def test_can_classify_entity_tuple_field(self) -> None:
-        assert classify_field(model_fields["entity_tuple"]) == (
-            FieldKind.entity_tuple,
-            Nested,
-        )
+        assert classify_field(model_fields["entity_tuple"]) == EntityTupleField(Nested)
 
     def test_can_classify_nullable_nested_entity_tuple(self) -> None:
-        assert classify_field(model_fields["nullable_entity_tuple"]) == (
-            FieldKind.entity_tuple,
-            Nested,
-        )
+        expected = EntityTupleField(Nested)
+        assert classify_field(model_fields["nullable_entity_tuple"]) == expected
 
     def test_can_classify_simple_nested_entity(self) -> None:
-        assert classify_field(model_fields["entity"]) == (FieldKind.entity, Nested)
+        assert classify_field(model_fields["entity"]) == EntityField(Nested)
 
     # See KIP-893.
     @pytest.mark.parametrize(
@@ -142,10 +149,7 @@ class TestClassifyField:
         ),
     )
     def test_can_classify_nullable_nested_entity(self, field: Field) -> None:
-        assert classify_field(field) == (FieldKind.entity, Nested)
+        assert classify_field(field) == EntityField(Nested)
 
     def test_can_classify_uuid_or_none(self) -> None:
-        assert classify_field(model_fields["uuid_or_none"]) == (
-            FieldKind.primitive,
-            UUID,
-        )
+        assert classify_field(model_fields["uuid_or_none"]) == PrimitiveField(UUID)

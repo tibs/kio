@@ -1,5 +1,3 @@
-# ruff: noqa: A003
-
 from __future__ import annotations
 
 import enum
@@ -78,7 +76,7 @@ class Primitive(enum.Enum):
     timedelta_i64 = "timedelta_i64"
     datetime_i64 = "datetime_i64"
 
-    def get_type_hint(self, optional: bool = False) -> str:
+    def get_type_hint(self, optional: bool = False) -> str:  # noqa: C901
         match self:
             case Primitive.int8:
                 hint = "i8"
@@ -98,12 +96,14 @@ class Primitive(enum.Enum):
                 hint = "f64"
             case Primitive.string:
                 hint = "str"
-            case Primitive.bytes_ | Primitive.records:
+            case Primitive.bytes_:
                 hint = "bytes"
+            case Primitive.records:
+                hint = "Records"
             case Primitive.bool_:
                 hint = "bool"
             case Primitive.uuid:
-                hint = "uuid.UUID | None"
+                hint = "uuid.UUID"
             case Primitive.error_code:
                 hint = "ErrorCode"
             case Primitive.timedelta_i32:
@@ -115,7 +115,7 @@ class Primitive(enum.Enum):
             case no_match:
                 assert_never(no_match)
 
-        if optional:
+        if optional or self is Primitive.uuid:
             return f"{hint} | None"
         return hint
 
@@ -257,6 +257,7 @@ timedelta_names: Final = frozenset(
         "RenewPeriodMs",
         "RetentionTimeMs",
         "HeartbeatIntervalMs",
+        "PushIntervalMs",
     }
 )
 datetime_names: Final = frozenset(
@@ -305,8 +306,7 @@ class PrimitiveField(_BaseField):
             or (
                 # Datetime fields might not be optional in the underlying representation,
                 # but if they have a default of -1, we want to represent that as None.
-                self.type is Primitive.datetime_i64
-                and self.default == "-1"
+                self.type is Primitive.datetime_i64 and self.default == "-1"
             )
         )
 
@@ -371,6 +371,7 @@ class RecordsField(_BaseField):
 
 class PrimitiveArrayField(_BaseField):
     type: PrimitiveArrayType
+    default: Literal["null"] | None = None
 
 
 class CommonStructArrayField(_BaseField):
@@ -445,7 +446,7 @@ class CommonStructSchema(BaseModel):
         global structs_registry
 
         if not isinstance(value, Sequence) or not value:
-            return value
+            return value  # type: ignore[return-value]
 
         def resolve_structs(raw_structs: Sequence[object]) -> Iterator[CommonStruct]:
             unsolved = []

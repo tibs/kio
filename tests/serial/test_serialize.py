@@ -4,10 +4,12 @@ import uuid
 
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import fields
 from typing import ClassVar
 
 import pytest
 
+from kio.schema.errors import ErrorCode
 from kio.schema.metadata.v12 import MetadataResponse
 from kio.schema.metadata.v12.response import MetadataResponseBroker
 from kio.schema.metadata.v12.response import MetadataResponsePartition
@@ -16,6 +18,7 @@ from kio.schema.types import BrokerId
 from kio.schema.types import TopicName
 from kio.serial import entity_writer
 from kio.serial import writers
+from kio.serial._serialize import get_field_writer
 from kio.serial._serialize import get_writer
 from kio.serial._shared import NullableEntityMarker
 from kio.serial.readers import read_boolean
@@ -28,10 +31,12 @@ from kio.serial.readers import read_int32
 from kio.serial.readers import read_unsigned_varint
 from kio.serial.readers import read_uuid
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
+from kio.static.primitive import i8
 from kio.static.primitive import i16
 from kio.static.primitive import i32
 from kio.static.primitive import i32Timedelta
+from tests.read import exhaust
+from tests.read import read
 
 
 class TestGetWriter:
@@ -136,6 +141,143 @@ class TestGetWriter:
             get_writer(kafka_type, flexible, optional)
 
 
+class TestGetFieldWriter:
+    def test_special_cases_request_header_client_id(self) -> None:
+        @dataclass
+        class E:
+            client_id: int
+
+        [field] = fields(E)
+        writer = get_field_writer(
+            field=field, flexible=True, is_request_header=True, is_tag=False
+        )
+        assert writer == writers.write_nullable_legacy_string
+
+    def test_returns_plain_writer_for_primitive_field(self) -> None:
+        @dataclass
+        class E:
+            a: i8 = field(metadata={"kafka_type": "int8"})
+
+        [extracted_field] = fields(E)
+        writer = get_field_writer(
+            field=extracted_field, flexible=True, is_request_header=True, is_tag=False
+        )
+        assert writer == writers.write_int8
+
+    def test_returns_array_writer_for_primitive_tuple_field(
+        self,
+        buffer: io.BytesIO,
+    ) -> None:
+        @dataclass
+        class E:
+            a: tuple[i8, ...] = field(metadata={"kafka_type": "int8"})
+
+        [extracted_field] = fields(E)
+        writer = get_field_writer(
+            field=extracted_field, flexible=True, is_request_header=True, is_tag=False
+        )
+
+        # We test that the returned object is an int8 array writer, by making
+        # sure it behaves like one.
+        writer(buffer, [1, 2, 3])
+
+        data = buffer.getvalue()
+        length, remaining = read(read_compact_array_length, data)
+        assert length == 3
+        value, remaining = read(read_int8, remaining)
+        assert value == 1
+        value, remaining = read(read_int8, remaining)
+        assert value == 2
+        value, remaining = read(read_int8, remaining)
+        assert value == 3
+
+    def test_returns_entity_writer_for_entity_field(
+        self,
+        buffer: io.BytesIO,
+    ) -> None:
+        @dataclass
+        class A:
+            __flexible__: ClassVar = True
+            f: i8 = field(metadata={"kafka_type": "int8"})
+
+        @dataclass
+        class B:
+            a: A
+
+        [extracted_field] = fields(B)
+        writer = get_field_writer(
+            field=extracted_field, flexible=True, is_request_header=True, is_tag=False
+        )
+
+        writer(buffer, A(f=i8(23)))
+
+        value, remaining = read(read_int8, buffer.getvalue())
+        assert value == 23
+        # tags
+        assert exhaust(read_unsigned_varint, remaining) == 0
+
+    def test_returns_entity_writer_for_nullable_entity_field(
+        self,
+        buffer: io.BytesIO,
+    ) -> None:
+        @dataclass
+        class A:
+            __flexible__: ClassVar = True
+            f: i8 = field(metadata={"kafka_type": "int8"})
+
+        @dataclass
+        class B:
+            a: A | None
+
+        [extracted_field] = fields(B)
+        writer = get_field_writer(
+            field=extracted_field, flexible=True, is_request_header=True, is_tag=False
+        )
+
+        writer(buffer, A(f=i8(23)))
+        writer(buffer, None)
+
+        marker_value, remaining = read(read_int8, buffer.getvalue())
+        assert NullableEntityMarker(marker_value) is NullableEntityMarker.not_null
+        value, remaining = read(read_int8, remaining)
+        assert value == 23
+        tags, remaining = read(read_unsigned_varint, remaining)
+        assert tags == 0
+        marker_value = exhaust(read_int8, remaining)
+        assert NullableEntityMarker(marker_value) is NullableEntityMarker.null
+
+    def test_returns_entity_tuple_writer_for_entity_tuple_field(
+        self,
+        buffer: io.BytesIO,
+    ) -> None:
+        @dataclass
+        class A:
+            __flexible__: ClassVar = True
+            f: i8 = field(metadata={"kafka_type": "int8"})
+
+        @dataclass
+        class B:
+            a: tuple[A, ...]
+
+        [extracted_field] = fields(B)
+        writer = get_field_writer(
+            field=extracted_field, flexible=True, is_request_header=True, is_tag=False
+        )
+
+        writer(buffer, [A(f=i8(23)), A(f=i8(17))])
+
+        value, remaining = read(read_compact_array_length, buffer.getvalue())
+        assert value == 2
+        value, remaining = read(read_int8, remaining)
+        assert value == 23
+        tags, remaining = read(read_unsigned_varint, remaining)
+        assert tags == 0
+        value, remaining = read(read_int8, remaining)
+        assert value == 17
+        tags = exhaust(read_unsigned_varint, remaining)
+        assert tags == 0
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LegacyWithTag:
     __type__: ClassVar = EntityType.header
@@ -197,70 +339,75 @@ def test_serialize_complex_entity(buffer: io.BytesIO) -> None:
         ),
     )
     write_metadata_response(buffer, instance)
-    buffer.seek(0)
 
     # throttle time
-    assert read_int32(buffer) == 123
+    throttle_time, remaining = read(read_int32, buffer.getvalue())
+    assert throttle_time == 123
 
     # brokers
-    assert read_compact_array_length(buffer) == 2
+    brokers, remaining = read(read_compact_array_length, remaining)
+    assert brokers == 2
     for i in range(1, 3):
-        # node_id
-        assert i == read_int32(buffer)
-        # host
-        assert read_compact_string(buffer) == "foo.bar"
-        # port
-        assert read_int32(buffer) == 1234
-        # rack
-        assert read_compact_string_nullable(buffer) is None
-        # tagged fields
-        assert read_unsigned_varint(buffer) == 0
+        node_id, remaining = read(read_int32, remaining)
+        assert node_id == i
+        host, remaining = read(read_compact_string, remaining)
+        assert host == "foo.bar"
+        port, remaining = read(read_int32, remaining)
+        assert port == 1234
+        rack, remaining = read(read_compact_string_nullable, remaining)
+        assert rack is None
+        tagged_fields, remaining = read(read_unsigned_varint, remaining)
+        assert tagged_fields == 0
 
-    # cluster_id
-    assert read_compact_string_nullable(buffer) == "556"
+    cluster_id, remaining = read(read_compact_string_nullable, remaining)
+    assert cluster_id == "556"
 
-    # controller id
-    assert read_int32(buffer) == 3
+    controller_id, remaining = read(read_int32, remaining)
+    assert controller_id == 3
 
     # topics
-    assert read_compact_array_length(buffer) == 1
+    topics, remaining = read(read_compact_array_length, remaining)
+    assert topics == 1
     for _ in range(1):
-        # error code
-        assert read_int16(buffer) == ErrorCode.kafka_storage_error.value
-        # name
-        assert read_compact_string_nullable(buffer) == "topic 1"
-        # topic id
-        assert topic_id == read_uuid(buffer)
-        # is internal
-        assert read_boolean(buffer) is False
+        error_code, remaining = read(read_int16, remaining)
+        assert error_code == ErrorCode.kafka_storage_error.value
+        name, remaining = read(read_compact_string_nullable, remaining)
+        assert name == "topic 1"
+        parsed_topic_id, remaining = read(read_uuid, remaining)
+        assert parsed_topic_id == topic_id
+        is_internal, remaining = read(read_boolean, remaining)
+        assert is_internal is False
         # partitions
-        assert read_compact_array_length(buffer) == 1
+        partitions, remaining = read(read_compact_array_length, remaining)
+        assert partitions == 1
         for __ in range(1):
-            # error code
-            assert read_int16(buffer) == ErrorCode.delegation_token_expired.value
-            # partition index
-            assert read_int32(buffer) == 5679
-            # leader id
-            assert read_int32(buffer) == 2345
-            # leader epoch
-            assert read_int32(buffer) == 6445678
-            # replica nodes
-            assert read_compact_array_length(buffer) == 2
-            assert read_int32(buffer) == 12345
-            assert read_int32(buffer) == 7651
-            # isr nodes
-            assert read_compact_array_length(buffer) == 0
-            # offline replicas
-            assert read_compact_array_length(buffer) == 0
-            # partition tagged fields
-            assert read_unsigned_varint(buffer) == 0
-        # topic authorized operations
-        assert read_int32(buffer) == 765443
-        # topic tagged fields
-        assert read_unsigned_varint(buffer) == 0
+            error_code, remaining = read(read_int16, remaining)
+            assert error_code == ErrorCode.delegation_token_expired.value
+            partition_index, remaining = read(read_int32, remaining)
+            assert partition_index == 5679
+            leader_id, remaining = read(read_int32, remaining)
+            assert leader_id == 2345
+            leader_epoch, remaining = read(read_int32, remaining)
+            assert leader_epoch == 6445678
+            replica_nodes, remaining = read(read_compact_array_length, remaining)
+            assert replica_nodes == 2
+            replica_node, remaining = read(read_int32, remaining)
+            assert replica_node == 12345
+            replica_node, remaining = read(read_int32, remaining)
+            assert replica_node == 7651
+            isr_nodes, remaining = read(read_compact_array_length, remaining)
+            assert isr_nodes == 0
+            offline_replicas, remaining = read(read_compact_array_length, remaining)
+            assert offline_replicas == 0
+            partition_tagged_fields, remaining = read(read_unsigned_varint, remaining)
+            assert partition_tagged_fields == 0
+        topic_authorized_operations, remaining = read(read_int32, remaining)
+        assert topic_authorized_operations == 765443
+        topic_tagged_fields, remaining = read(read_unsigned_varint, remaining)
+        assert topic_tagged_fields == 0
 
     # main entity tagged fields
-    assert read_unsigned_varint(buffer) == 0
+    assert exhaust(read_unsigned_varint, remaining) == 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -288,13 +435,17 @@ def test_can_write_populated_nested_nullable_entity(buffer: io.BytesIO) -> None:
         name="parent name",
     )
     write_nested_nullable(buffer, instance)
-    buffer.seek(0)
 
-    assert read_int8(buffer) == NullableEntityMarker.not_null.value
-    assert read_compact_string(buffer) == "child name"
-    assert read_unsigned_varint(buffer) == 0  # tagged fields
-    assert read_compact_string(buffer) == "parent name"
-    assert read_unsigned_varint(buffer) == 0  # tagged fields
+    null_marker, remaining = read(read_int8, buffer.getvalue())
+    assert null_marker == NullableEntityMarker.not_null.value
+    child_name, remaining = read(read_compact_string, remaining)
+    assert child_name == "child name"
+    tagged_fields, remaining = read(read_unsigned_varint, remaining)
+    assert tagged_fields == 0
+    parent_name, remaining = read(read_compact_string, remaining)
+    assert parent_name == "parent name"
+    tagged_fields = exhaust(read_unsigned_varint, remaining)
+    assert tagged_fields == 0
 
 
 def test_can_write_empty_nested_nullable_entity(buffer: io.BytesIO) -> None:
@@ -304,8 +455,10 @@ def test_can_write_empty_nested_nullable_entity(buffer: io.BytesIO) -> None:
         name="parent name",
     )
     write_nested_nullable(buffer, instance)
-    buffer.seek(0)
 
-    assert read_int8(buffer) == NullableEntityMarker.null.value
-    assert read_compact_string(buffer) == "parent name"
-    assert read_unsigned_varint(buffer) == 0  # tagged fields
+    null_marker, remaining = read(read_int8, buffer.getvalue())
+    assert null_marker == NullableEntityMarker.null.value
+    parent_name, remaining = read(read_compact_string, remaining)
+    assert parent_name == "parent name"
+    tagged_fields = exhaust(read_unsigned_varint, remaining)
+    assert tagged_fields == 0

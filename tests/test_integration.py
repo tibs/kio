@@ -15,6 +15,8 @@ from unittest import mock
 
 import pytest
 
+from typing_extensions import Buffer
+
 import kio.schema.request_header.v0.header
 import kio.schema.request_header.v1.header
 import kio.schema.request_header.v2.header
@@ -33,6 +35,7 @@ from kio.schema.delete_topics.v6 import DeleteTopicsRequest
 from kio.schema.delete_topics.v6 import DeleteTopicsResponse
 from kio.schema.delete_topics.v6.request import DeleteTopicState
 from kio.schema.delete_topics.v6.response import DeletableTopicResult
+from kio.schema.errors import ErrorCode
 from kio.schema.fetch.v13.request import FetchPartition
 from kio.schema.fetch.v13.request import FetchRequest
 from kio.schema.fetch.v13.request import FetchTopic
@@ -53,7 +56,6 @@ from kio.serial import entity_writer
 from kio.serial.readers import read_int32
 from kio.serial.writers import Writable
 from kio.serial.writers import write_int32
-from kio.static.constants import ErrorCode
 from kio.static.constants import uuid_zero
 from kio.static.primitive import i8
 from kio.static.primitive import i16
@@ -65,6 +67,7 @@ from kio.static.protocol import RequestPayload
 from kio.static.protocol import ResponsePayload
 
 from . import fixtures
+from .read import read
 
 pytestmark = pytest.mark.integration
 
@@ -134,33 +137,33 @@ async def send(
     await stream.drain()
 
 
-class CorrelationIdMismatch(RuntimeError):
-    ...
+class CorrelationIdMismatch(RuntimeError): ...
 
 
-async def read_response_bytes(stream: StreamReader) -> io.BytesIO:
-    response_length_bytes = await stream.readexactly(4)
-    response_length = read_int32(io.BytesIO(response_length_bytes))
-    return io.BytesIO(await stream.readexactly(response_length))
+async def read_response_bytes(stream: StreamReader) -> memoryview:
+    response_length_bytes = memoryview(await stream.readexactly(4))
+    response_length, remaining = read(read_int32, response_length_bytes)
+    assert remaining == b""
+    return memoryview(await stream.readexactly(response_length))
 
 
 R = TypeVar("R", bound=ResponsePayload)
 
 
 def parse_response(
-    buffer: io.BytesIO,
+    buffer: Buffer,
     response_type: type[R],
     correlation_id: i32,
-) -> R:
+) -> tuple[R, memoryview]:
     header_schema: Any = response_type.__header_schema__
     read_header = entity_reader(header_schema)
-    header = read_header(buffer)
+    header, remaining = read(read_header, buffer)
 
     if header.correlation_id != correlation_id:
         raise CorrelationIdMismatch
 
     read_payload = entity_reader(response_type)
-    return read_payload(buffer)
+    return read(read_payload, remaining)
 
 
 async def make_request(
@@ -178,12 +181,19 @@ async def make_request(
     with closing(stream_writer):
         async with asyncio.timeout(10):
             await send(stream_writer, request, correlation_id)
-            response = await read_response_bytes(stream_reader)
+            response_bytes = await read_response_bytes(stream_reader)
 
-    # After this point, the connection is closed, and we're making synchronously reading
-    # the response from the in-memory buffer.
-    with response as open_message_buffer:
-        return parse_response(open_message_buffer, response_type, correlation_id)
+    # After this point, the connection is closed, and we're synchronously reading the
+    # response from the in-memory buffer.
+    with response_bytes as open_message_buffer:
+        response, remaining = parse_response(
+            open_message_buffer,
+            response_type,
+            correlation_id,
+        )
+        assert remaining == b""
+
+    return response
 
 
 async def test_roundtrip_api_versions_v3() -> None:
@@ -202,43 +212,43 @@ async def test_roundtrip_api_versions_v3() -> None:
             api_versions_v3_response.SupportedFeatureKey(
                 name="metadata.version",
                 min_version=i16(1),
-                max_version=i16(7),
+                max_version=i16(21),
             ),
         ),
         finalized_features=(
             api_versions_v3_response.FinalizedFeatureKey(
                 name="metadata.version",
-                min_version_level=i16(7),
-                max_version_level=i16(7),
+                min_version_level=i16(21),
+                max_version_level=i16(21),
             ),
         ),
         finalized_features_epoch=mock.ANY,
         api_keys=(
-            ApiVersion(api_key=i16(0), min_version=i16(0), max_version=i16(9)),
-            ApiVersion(api_key=i16(1), min_version=i16(0), max_version=i16(13)),
-            ApiVersion(api_key=i16(2), min_version=i16(0), max_version=i16(7)),
+            ApiVersion(api_key=i16(0), min_version=i16(0), max_version=i16(11)),
+            ApiVersion(api_key=i16(1), min_version=i16(0), max_version=i16(17)),
+            ApiVersion(api_key=i16(2), min_version=i16(0), max_version=i16(9)),
             ApiVersion(api_key=i16(3), min_version=i16(0), max_version=i16(12)),
-            ApiVersion(api_key=i16(8), min_version=i16(0), max_version=i16(8)),
-            ApiVersion(api_key=i16(9), min_version=i16(0), max_version=i16(8)),
-            ApiVersion(api_key=i16(10), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(8), min_version=i16(0), max_version=i16(9)),
+            ApiVersion(api_key=i16(9), min_version=i16(0), max_version=i16(9)),
+            ApiVersion(api_key=i16(10), min_version=i16(0), max_version=i16(6)),
             ApiVersion(api_key=i16(11), min_version=i16(0), max_version=i16(9)),
             ApiVersion(api_key=i16(12), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(13), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(14), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(15), min_version=i16(0), max_version=i16(5)),
-            ApiVersion(api_key=i16(16), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(16), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(17), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(18), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(18), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(19), min_version=i16(0), max_version=i16(7)),
             ApiVersion(api_key=i16(20), min_version=i16(0), max_version=i16(6)),
             ApiVersion(api_key=i16(21), min_version=i16(0), max_version=i16(2)),
-            ApiVersion(api_key=i16(22), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(22), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(23), min_version=i16(0), max_version=i16(4)),
-            ApiVersion(api_key=i16(24), min_version=i16(0), max_version=i16(3)),
-            ApiVersion(api_key=i16(25), min_version=i16(0), max_version=i16(3)),
-            ApiVersion(api_key=i16(26), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(24), min_version=i16(0), max_version=i16(5)),
+            ApiVersion(api_key=i16(25), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(26), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(27), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(28), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(28), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(29), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(30), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(31), min_version=i16(0), max_version=i16(3)),
@@ -248,6 +258,10 @@ async def test_roundtrip_api_versions_v3() -> None:
             ApiVersion(api_key=i16(35), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(36), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(37), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(38), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(39), min_version=i16(0), max_version=i16(2)),
+            ApiVersion(api_key=i16(40), min_version=i16(0), max_version=i16(2)),
+            ApiVersion(api_key=i16(41), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(42), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(43), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(44), min_version=i16(0), max_version=i16(1)),
@@ -256,14 +270,23 @@ async def test_roundtrip_api_versions_v3() -> None:
             ApiVersion(api_key=i16(47), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(48), min_version=i16(0), max_version=i16(1)),
             ApiVersion(api_key=i16(49), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(55), min_version=i16(0), max_version=i16(1)),
+            ApiVersion(api_key=i16(50), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(51), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(55), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(57), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(60), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(60), min_version=i16(0), max_version=i16(1)),
             ApiVersion(api_key=i16(61), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(64), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(65), min_version=i16(0), max_version=i16(0)),
-            ApiVersion(api_key=i16(66), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(66), min_version=i16(0), max_version=i16(1)),
+            ApiVersion(api_key=i16(68), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(69), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(74), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(75), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(80), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(81), min_version=i16(0), max_version=i16(0)),
         ),
+        zk_migration_ready=False,
     )
 
 
@@ -277,31 +300,31 @@ async def test_roundtrip_api_versions_v2() -> None:
         error_code=ErrorCode.none,
         throttle_time=timedelta_zero,
         api_keys=(
-            ApiVersion(api_key=i16(0), min_version=i16(0), max_version=i16(9)),
-            ApiVersion(api_key=i16(1), min_version=i16(0), max_version=i16(13)),
-            ApiVersion(api_key=i16(2), min_version=i16(0), max_version=i16(7)),
+            ApiVersion(api_key=i16(0), min_version=i16(0), max_version=i16(11)),
+            ApiVersion(api_key=i16(1), min_version=i16(0), max_version=i16(17)),
+            ApiVersion(api_key=i16(2), min_version=i16(0), max_version=i16(9)),
             ApiVersion(api_key=i16(3), min_version=i16(0), max_version=i16(12)),
-            ApiVersion(api_key=i16(8), min_version=i16(0), max_version=i16(8)),
-            ApiVersion(api_key=i16(9), min_version=i16(0), max_version=i16(8)),
-            ApiVersion(api_key=i16(10), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(8), min_version=i16(0), max_version=i16(9)),
+            ApiVersion(api_key=i16(9), min_version=i16(0), max_version=i16(9)),
+            ApiVersion(api_key=i16(10), min_version=i16(0), max_version=i16(6)),
             ApiVersion(api_key=i16(11), min_version=i16(0), max_version=i16(9)),
             ApiVersion(api_key=i16(12), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(13), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(14), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(15), min_version=i16(0), max_version=i16(5)),
-            ApiVersion(api_key=i16(16), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(16), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(17), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(18), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(18), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(19), min_version=i16(0), max_version=i16(7)),
             ApiVersion(api_key=i16(20), min_version=i16(0), max_version=i16(6)),
             ApiVersion(api_key=i16(21), min_version=i16(0), max_version=i16(2)),
-            ApiVersion(api_key=i16(22), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(22), min_version=i16(0), max_version=i16(5)),
             ApiVersion(api_key=i16(23), min_version=i16(0), max_version=i16(4)),
-            ApiVersion(api_key=i16(24), min_version=i16(0), max_version=i16(3)),
-            ApiVersion(api_key=i16(25), min_version=i16(0), max_version=i16(3)),
-            ApiVersion(api_key=i16(26), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(24), min_version=i16(0), max_version=i16(5)),
+            ApiVersion(api_key=i16(25), min_version=i16(0), max_version=i16(4)),
+            ApiVersion(api_key=i16(26), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(27), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(28), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(28), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(29), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(30), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(31), min_version=i16(0), max_version=i16(3)),
@@ -311,6 +334,10 @@ async def test_roundtrip_api_versions_v2() -> None:
             ApiVersion(api_key=i16(35), min_version=i16(0), max_version=i16(4)),
             ApiVersion(api_key=i16(36), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(37), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(38), min_version=i16(0), max_version=i16(3)),
+            ApiVersion(api_key=i16(39), min_version=i16(0), max_version=i16(2)),
+            ApiVersion(api_key=i16(40), min_version=i16(0), max_version=i16(2)),
+            ApiVersion(api_key=i16(41), min_version=i16(0), max_version=i16(3)),
             ApiVersion(api_key=i16(42), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(43), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(44), min_version=i16(0), max_version=i16(1)),
@@ -319,13 +346,21 @@ async def test_roundtrip_api_versions_v2() -> None:
             ApiVersion(api_key=i16(47), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(48), min_version=i16(0), max_version=i16(1)),
             ApiVersion(api_key=i16(49), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(55), min_version=i16(0), max_version=i16(1)),
+            ApiVersion(api_key=i16(50), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(51), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(55), min_version=i16(0), max_version=i16(2)),
             ApiVersion(api_key=i16(57), min_version=i16(0), max_version=i16(1)),
-            ApiVersion(api_key=i16(60), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(60), min_version=i16(0), max_version=i16(1)),
             ApiVersion(api_key=i16(61), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(64), min_version=i16(0), max_version=i16(0)),
             ApiVersion(api_key=i16(65), min_version=i16(0), max_version=i16(0)),
-            ApiVersion(api_key=i16(66), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(66), min_version=i16(0), max_version=i16(1)),
+            ApiVersion(api_key=i16(68), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(69), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(74), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(75), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(80), min_version=i16(0), max_version=i16(0)),
+            ApiVersion(api_key=i16(81), min_version=i16(0), max_version=i16(0)),
         ),
     )
 

@@ -33,6 +33,8 @@ from kio.static.protocol import Entity
 
 from .hypothesis import configure_hypothesis
 
+pytest.register_assert_rewrite("tests.read_exhausted")
+
 configure_hypothesis()
 
 
@@ -119,6 +121,7 @@ class JavaTester:
     class _Encoder(JSONEncoder):
         def default(self, o: Any) -> Any:
             if dataclasses.is_dataclass(o):
+                assert not isinstance(o, type)
                 return self._replace_tzaware_nulls(
                     {
                         k: v
@@ -157,7 +160,7 @@ class JavaTester:
             "docker",
             "compose",
             "-f",
-            str(Path(__file__).parent / "docker-compose-java-tester.yaml"),
+            str(Path(__file__).parent.parent / "compose.yml"),
             "run",
             "--build",
             "--rm",

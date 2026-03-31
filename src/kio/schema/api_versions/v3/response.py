@@ -1,16 +1,14 @@
 """
-Generated from ApiVersionsResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/ApiVersionsResponse.json
+Generated from ``clients/src/main/resources/common/message/ApiVersionsResponse.json``.
 """
 
 from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v0.header import ResponseHeader
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
 from kio.static.primitive import i16
 from kio.static.primitive import i32Timedelta
 from kio.static.primitive import i64
@@ -77,7 +75,7 @@ class ApiVersionsResponse:
     supported_features: tuple[SupportedFeatureKey, ...] = field(
         metadata={"tag": 0}, default=()
     )
-    """Features supported by the broker."""
+    """Features supported by the broker. Note: in v0-v3, features with MinSupportedVersion = 0 are omitted."""
     finalized_features_epoch: i64 = field(
         metadata={"kafka_type": "int64", "tag": 1}, default=i64(-1)
     )

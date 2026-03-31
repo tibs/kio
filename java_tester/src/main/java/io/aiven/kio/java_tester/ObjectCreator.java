@@ -7,6 +7,7 @@ import java.util.List;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.BaseRecords;
+import org.apache.kafka.common.record.MemoryRecords;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.text.CaseUtils;
@@ -88,7 +89,10 @@ class ObjectCreator<T> extends BaseCreator {
                 List<?> list = new CollectionCreator(rootMessageInfo, fieldValue, fieldName, fieldSchema).createList();
                 setter.invoke(instance, list);
             } else if (BaseRecords.class.isAssignableFrom(parameterType)) {
-                throw new Exception("Not implemented");
+                ByteBuffer buffer = getByteBuffer(fieldValue, fieldName);
+                if (buffer != null) {
+                    setter.invoke(instance, MemoryRecords.readableRecords(buffer));
+                }
             } else {
                 Object o = new ObjectCreator<>(
                     rootMessageInfo, new EntityClass<>(parameterType), fieldSchema).create(fieldValue);
@@ -118,6 +122,7 @@ class ObjectCreator<T> extends BaseCreator {
             case "max_timestamp" -> fieldName = "max_timestamp_ms";
             case "transaction_start_time" -> fieldName = "transaction_start_time_ms";
             case "log_append_time" -> fieldName = "log_append_time_ms";
+            case "push_interval" -> fieldName = "push_interval_ms";
         }
 
         fieldName = CaseUtils.toCamelCase(fieldName, true, '_');
@@ -127,6 +132,7 @@ class ObjectCreator<T> extends BaseCreator {
                 case "IssueTimestampMs" -> fieldName = "IssueTimestamp";
                 case "ExpiryTimestampMs" -> fieldName = "ExpiryTimestamp";
                 case "MaxTimestampMs" -> fieldName = "MaxTimestamp";
+                case "PushIntervalMs" -> fieldName = "PushInterval";
             }
         }
 

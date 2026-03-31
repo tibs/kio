@@ -1,16 +1,14 @@
 """
-Generated from DescribeConfigsResponse.json.
-
-https://github.com/apache/kafka/tree/3.6.0/clients/src/main/resources/common/message/DescribeConfigsResponse.json
+Generated from ``clients/src/main/resources/common/message/DescribeConfigsResponse.json``.
 """
 
 from dataclasses import dataclass
 from dataclasses import field
 from typing import ClassVar
 
+from kio.schema.errors import ErrorCode
 from kio.schema.response_header.v0.header import ResponseHeader
 from kio.static.constants import EntityType
-from kio.static.constants import ErrorCode
 from kio.static.primitive import i8
 from kio.static.primitive import i16
 from kio.static.primitive import i32Timedelta

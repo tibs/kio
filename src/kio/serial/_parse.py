@@ -1,25 +1,43 @@
+import logging
+
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import Field
+from dataclasses import dataclass
 from dataclasses import fields
-from typing import IO
+from typing import Final
+from typing import Generic
 from typing import Literal
+from typing import TypeAlias
 from typing import TypeVar
 from typing import assert_never
+from typing import final
 from typing import overload
 
+from typing_extensions import Buffer
+
 from kio._utils import cache
+from kio.static.primitive import uvarint
 from kio.static.protocol import Entity
 
 from . import readers
-from ._introspect import FieldKind
+from ._implicit_defaults import get_tagged_field_default
+from ._introspect import EntityField
+from ._introspect import EntityTupleField
+from ._introspect import PrimitiveField
+from ._introspect import PrimitiveTupleField
 from ._introspect import classify_field
 from ._introspect import get_field_tag
 from ._introspect import get_schema_field_type
 from ._introspect import is_optional
 from ._shared import NullableEntityMarker
-from .readers import read_int8
+from .readers import Reader
+from .readers import SizedResult
+
+logger: Final = logging.getLogger(__name__)
 
 
-def get_reader(
+def get_reader(  # noqa: C901
     kafka_type: str,
     flexible: bool,
     optional: bool,
@@ -59,7 +77,7 @@ def get_reader(
             return readers.read_legacy_bytes
         case ("bytes" | "records", False, True):
             return readers.read_nullable_legacy_bytes
-        case ("uuid", _, True):
+        case ("uuid", _, _):
             return readers.read_uuid
         case ("bool", _, False):
             return readers.read_boolean
@@ -94,66 +112,73 @@ def get_field_reader(
     if is_request_header and field.name == "client_id":
         return readers.read_nullable_legacy_string  # type: ignore[return-value]
 
-    field_kind, field_type = classify_field(field)
     flexible = entity_type.__flexible__
-    array_reader = (
-        readers.compact_array_reader if flexible else readers.legacy_array_reader
-    )
+    field_class = classify_field(field)
 
-    match field_kind:
-        case FieldKind.primitive:
-            return get_reader(
+    match field_class:
+        case PrimitiveField():
+            inner_type_reader = get_reader(
                 kafka_type=get_schema_field_type(field),
                 flexible=flexible,
                 optional=is_optional(field) and not is_tagged_field,
             )
-        case FieldKind.primitive_tuple:
-            return array_reader(  # type: ignore[return-value]
-                get_reader(
-                    kafka_type=get_schema_field_type(field),
-                    flexible=flexible,
-                    optional=is_optional(field) and not is_tagged_field,
-                )
+        case PrimitiveTupleField():
+            # For primitive arrays, nullability applies to the array itself,
+            # not the inner type. The inner type reader is always non-nullable.
+            inner_type_reader = get_reader(
+                kafka_type=get_schema_field_type(field),
+                flexible=flexible,
+                optional=False,
             )
-        case FieldKind.entity:
-            return (  # type: ignore[no-any-return]
-                entity_reader(field_type, nullable=True)  # type: ignore[call-overload]
+        case EntityField(field_type):
+            inner_type_reader = (
+                entity_reader(field_type, nullable=True)
                 if is_optional(field)
-                else entity_reader(field_type, nullable=False)  # type: ignore[call-overload]
+                else entity_reader(field_type, nullable=False)
             )
-        case FieldKind.entity_tuple:
-            return array_reader(  # type: ignore[return-value]
-                entity_reader(field_type)  # type: ignore[type-var]
-            )
+        case EntityTupleField(field_type):
+            inner_type_reader = entity_reader(field_type)
         case no_match:
             assert_never(no_match)
 
+    if field_class.is_array:
+        array_reader = (
+            readers.compact_array_reader if flexible else readers.legacy_array_reader
+        )
+        # mypy fails to bind T to Sequence[object] here.
+        return array_reader(inner_type_reader)  # type: ignore[return-value]
+
+    return inner_type_reader
+
 
 E = TypeVar("E", bound=Entity)
+FieldReaderPair: TypeAlias = tuple[Field[T], Reader[T]]
+TaggedFieldReaderTriplet: TypeAlias = tuple[Field[T], Reader[T], T]
 
 
-@overload
-def entity_reader(
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _BaseSchema(Generic[E]):
+    entity_type: type[E]
+    field_readers: Sequence[FieldReaderPair[object]]
+    tagged_field_readers: Mapping[uvarint, TaggedFieldReaderTriplet[object]]
+
+
+@final
+class _NonNullableSchema(_BaseSchema[E], Generic[E]): ...
+
+
+@final
+class _NullableSchema(_BaseSchema[E], Generic[E]): ...
+
+
+_Schema: TypeAlias = _NonNullableSchema[E] | _NullableSchema[E]
+
+
+def _compile_schema(
     entity_type: type[E],
-    nullable: Literal[False] = ...,
-) -> readers.Reader[E]:
-    ...
-
-
-@overload
-def entity_reader(
-    entity_type: type[E],
-    nullable: Literal[True],
-) -> readers.Reader[E | None]:
-    ...
-
-
-@cache
-def entity_reader(
-    entity_type: type[E],
-    nullable: bool = False,
-) -> readers.Reader[E | None]:
-    field_readers = {}
+    nullable: bool,
+) -> _Schema[E]:
+    field_readers = []
     tagged_field_readers = {}
     is_request_header = entity_type.__name__ == "RequestHeader"
 
@@ -166,42 +191,113 @@ def entity_reader(
             is_tagged_field=tag is not None,
         )
         if tag is not None:
-            tagged_field_readers[tag] = field, field_reader
+            tagged_field_readers[tag] = (
+                field,
+                field_reader,
+                get_tagged_field_default(field),
+            )
         else:
-            field_readers[field] = field_reader
+            field_readers.append((field, field_reader))
 
     # Assert we don't find tags for non-flexible models.
     if tagged_field_readers and not entity_type.__flexible__:
         raise ValueError("Found tagged fields on a non-flexible model")
 
-    def read_entity(buffer: IO[bytes]) -> E:
-        # Read regular fields.
-        kwargs = {
-            field.name: field_reader(buffer)
-            for field, field_reader in field_readers.items()
-        }
+    if nullable:
+        return _NullableSchema(
+            entity_type=entity_type,
+            field_readers=field_readers,
+            tagged_field_readers=tagged_field_readers,
+        )
+    else:
+        return _NonNullableSchema(
+            entity_type=entity_type,
+            field_readers=field_readers,
+            tagged_field_readers=tagged_field_readers,
+        )
 
-        # For non-flexible entities we're done here.
-        if not entity_type.__flexible__:
-            return entity_type(**kwargs)
 
-        # Read tagged fields.
-        num_tagged_fields = readers.read_unsigned_varint(buffer)
-        for _ in range(num_tagged_fields):
-            field_tag = readers.read_unsigned_varint(buffer)
-            readers.read_unsigned_varint(buffer)  # field length
-            field, field_reader = tagged_field_readers[field_tag]
-            kwargs[field.name] = field_reader(buffer)
+@overload
+def _read_compiled(
+    buffer: Buffer,
+    offset: int,
+    schema: _NullableSchema[E],
+) -> SizedResult[E | None]: ...
+@overload
+def _read_compiled(
+    buffer: Buffer,
+    offset: int,
+    schema: _NonNullableSchema[E],
+) -> SizedResult[E]: ...
+def _read_compiled(
+    buffer: Buffer,
+    offset: int,
+    schema: _NonNullableSchema[E] | _NullableSchema[E],
+) -> SizedResult[E | None]:
+    size = 0
 
-        return entity_type(**kwargs)
-
-    if not nullable:
-        return read_entity
-
+    # Handle nullable entity fields.
     # This is undocumented behavior, formalized in KIP-893.
     # https://cwiki.apache.org/confluence/display/KAFKA/KIP-893%3A+The+Kafka+protocol+should+support+nullable+structs
-    def read_nullable_entity(buffer: IO[bytes]) -> E | None:
-        marker = NullableEntityMarker(read_int8(buffer))
-        return None if marker is NullableEntityMarker.null else read_entity(buffer)
+    if isinstance(schema, _NullableSchema):
+        marker_int, add_size = readers.read_int8(buffer, offset)
+        size += add_size
+        if NullableEntityMarker(marker_int) is NullableEntityMarker.null:
+            return None, size
 
-    return read_nullable_entity
+    # Read regular fields.
+    kwargs = {}
+    for field, field_reader in schema.field_readers:
+        kwargs[field.name], add_size = field_reader(buffer, offset + size)
+        size += add_size
+
+    # For non-flexible entities we're done here.
+    if not schema.entity_type.__flexible__:
+        return schema.entity_type(**kwargs), size
+
+    # Read tagged fields.
+    tagged_field_values = {}
+    num_tagged_fields, num_size = readers.read_unsigned_varint(buffer, offset + size)
+    size += num_size
+    for _ in range(num_tagged_fields):
+        # Read tag identifier.
+        field_tag, add_size = readers.read_unsigned_varint(buffer, offset + size)
+        size += add_size
+        # Ignore field length.
+        _, add_size = readers.read_unsigned_varint(buffer, offset + size)
+        size += add_size
+        # Lookup tag reader and read the field with it.
+        field, field_reader, _ = schema.tagged_field_readers[field_tag]
+        tagged_field_values[field.name], add_size = field_reader(buffer, offset + size)
+        size += add_size
+
+    # Resolve tagged field implicit defaults.
+    for field, _, implicit_default in schema.tagged_field_readers.values():
+        kwargs[field.name] = tagged_field_values.get(field.name, implicit_default)
+
+    return schema.entity_type(**kwargs), size
+
+
+@overload
+def entity_reader(
+    entity_type: type[E],
+    nullable: Literal[False] = ...,
+) -> readers.Reader[E]: ...
+@overload
+def entity_reader(
+    entity_type: type[E],
+    nullable: Literal[True],
+) -> readers.Reader[E | None]: ...
+@cache
+def entity_reader(
+    entity_type: type[E],
+    nullable: bool = False,
+) -> readers.Reader[E | None]:
+    def read_entity(
+        buffer: Buffer,
+        offset: int,
+        _readable_schema: _Schema[E] = _compile_schema(entity_type, nullable),
+    ) -> readers.SizedResult[E | None]:
+        return _read_compiled(buffer, offset, _readable_schema)
+
+    return read_entity
